@@ -1,5 +1,5 @@
 (library
  (public_name "fs0")
  (preprocess (pps ppx_sexp_conv))
- (libraries ))
+ (libraries bigstringaf))
 
