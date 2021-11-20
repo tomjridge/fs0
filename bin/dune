@@ -1,0 +1,6 @@
+
+(executable
+ (public_name "main")
+ (modules Main)
+ (libraries fs0))
+
