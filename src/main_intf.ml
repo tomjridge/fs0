@@ -57,13 +57,15 @@ module type FREELIST = sig
   val create     : blk_id -> t m
   val open_      : blk_id -> t option m
 
-  val used_blks  : t -> blk_id list m
 
-  val alloc      : ?clean:[`Char of char | `Int of int] -> unit -> blk_id m
-  val free       : blk_id -> unit
+  val alloc      : ?clean:[`Char of char | `Int of int] -> t -> blk_id m
+  val free       : t -> blk_id -> unit m
 
-  val alloc_many : ?clean:[`Char of char | `Int of int] -> int -> blk_id list m
-  val free_many  : blk_id list -> unit m  
+  val alloc_many : ?clean:[`Char of char | `Int of int] -> t -> int -> blk_id list m
+  val free_many  : t -> blk_id list -> unit m  
+
+  val debug_used_blks  : t -> blk_id list m
+  (** The blks used by the freelist itself *)
 
 end
 
@@ -73,8 +75,8 @@ module type BLK0 = sig
   type t = { freelist_root: blk_id; prefiles: blk_id array; (* ... *) }
   type 'a m
 
-  val read: unit -> t m
-  val write: t -> unit m
+  val read  : unit -> t m
+  val write : t -> unit m
   
 end
 
@@ -88,28 +90,34 @@ module type INT_MAP = sig
   type k := int
   type v := int
 
-  val create: blk_id -> t
+  val create   : blk_id -> t m
+  val open_    : blk_id -> t option m
 
-  val height: t -> int  (** height of the underlying tree on disk *)
+  val destroy  : t -> unit m
+  (** Free underlying blks *)
+
+  val height   : t -> int  (** height of the underlying tree on disk *)
 
   val find_opt : t -> k -> v option m
+  val replace  : t -> k -> v -> unit
+  val delete   : t -> k -> unit
 
-  val replace: t -> k -> v -> unit
+  val sync     : t -> unit m
 
-  val delete : t -> k -> unit
-
-  val sync : t -> unit m
-
+  val debug_used_blks: t -> blk_id list m
 end
 
 
 (** A map from blk index to blk_id, maintained on disk and mirrored in
    memory *)
 module type BLK_MAP = sig
-
-  type t (* = { root: blk_id } *)
-  type blk_id
   type 'a m
+  type blk_id
+
+  type t (* = { root: blk_id of int_map } *)
+
+  val create: blk_id -> t m
+  val open_ : blk_id -> t option m
 
   val height: t -> int  (** height of the underlying tree on disk *)
 
@@ -235,8 +243,8 @@ module type DIR = sig
   val create        : blk_id -> t m
   val open_         : blk_id -> t option m
 
-  val replace       : t -> k -> v -> unit m
   val find_opt      : t -> k -> v option m
+  val replace       : t -> k -> v -> unit m
   val delete        : t -> k -> unit m
 
   (** Directory handles *)
