@@ -144,9 +144,304 @@ module Freelist_1 = struct
 end
 
 module Freelist : sig
-  include FREELIST with type blk_id = Blkdev.blk_id
+  include FREELIST with type 'a m = 'a Monad.m and type blk_id = Blkdev.blk_id
   type blk_id = Blkdev.blk_id[@@deriving sexp]
 end = Freelist_1
 
 module _ : FREELIST = Freelist
+
+
+module Runtime_context = struct
+
+  (* These will be filled in later *)
+  type file
+  type dir
+
+  (* NOTE we don't have file and dir types yet; we fill them in later *)
+  type t = { 
+    freelist: Freelist.t; 
+    (* blkdev:Blkdev.t;  only 1 blkdev *)
+    live_objs:blk_id -> [ `F of file | `D of dir ] option }
+
+  type ctxt = t
+
+(*
+  let the_ctxt = ref None
+
+  let ctxt () : _ t = 
+    match !the_ctxt with 
+    | None -> failwith __LOC__
+    | Some x -> x
+*)
+end
+open Runtime_context
+
+
+module Int_map_1 = struct
+
+  include Monad
+
+  type blk_id = Blkdev.blk_id
+  type ctxt = Runtime_context.t
+                  
+  module T = struct
+    type t = { ctxt:ctxt; blk_id: blk_id; mutable map:int Int_map.t }      
+  end
+  include T
+
+  let fn blk_id = Printf.sprintf "int_map_%d" blk_id
+
+  module Tmp = struct
+    type t = { blk_id: blk_id; map: (int*int) list }[@@deriving sexp]
+    let of_t t = { blk_id=t.T.blk_id; map=(t.map |> Int_map.bindings) }
+    let to_t ctxt t = { ctxt; T.blk_id=t.blk_id; map=Int_map.of_seq (List.to_seq t.map) }
+  end
+
+  let save t = 
+    t |> Tmp.of_t |> Tmp.sexp_of_t |> Sexplib.Sexp.save_hum (fn t.blk_id)
+
+  let load ctxt fn = 
+    assert(Sys.file_exists fn);
+    Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> Tmp.to_t ctxt
+    
+  let create ctxt blk_id = 
+    let t = {ctxt;blk_id;map=Int_map.empty} in
+    save t;
+    return t
+
+  let open_ ctxt blk_id = load ctxt (fn blk_id) |> fun x -> return (Some x)
+
+  let root t = t.blk_id
+    
+  let debug_used_blks t = return [t.blk_id]
+
+  let destroy t = 
+    debug_used_blks t >>= fun xs -> 
+    Freelist.free_many t.ctxt.freelist xs
+
+  let height t = 
+    Int_map.cardinal t.map |> Base.Int.ceil_log2
+
+  let find_opt t k = Int_map.find_opt k t.map |> return
+
+  let replace t k v = t.map <- Int_map.add k v t.map; return ()
+
+  let delete t k = t.map <- Int_map.remove k t.map; return ()
+
+  let sync t = save t |> return
+
+end
+
+module Int_map' : sig
+  include INT_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=ctxt
+end = Int_map_1
+
+module Int_map = Int_map_1 (* expose load/save *)
+
+
+module Blk_map_1 = struct
+
+  include Int_map
+
+  type t = Int_map.t
+
+  let set_blkid t i blk_id = replace t i blk_id
+
+  let get_blkid t i = find_opt t i
+
+end
+
+module Blk_map' : sig
+  include BLK_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=ctxt
+end = Blk_map_1
+
+module Blk_map = Blk_map_1  (* expose additional functions *)
+
+
+
+module Kind_1 = struct
+  include Monad
+  type blk_id = Blkdev.blk_id
+  type ctxt = Runtime_context.t
+
+  type file_meta = { f_ino:blk_id; f_size:int; f_nlink:int }  
+  (* let's associate the inode number with the root blk_id *)
+
+  type dir_meta = { d_ino:blk_id; d_size:int } (* size is the number of entries *)
+
+  (* NOTE patched later *)
+  let live_obj_to_meta : ([ `F of 'f | `D of 'd ] -> [`F of file_meta | `D of dir_meta]) ref = ref (fun _x -> failwith "FIXME")
+
+  let _ = live_obj_to_meta
+
+  let stat ctxt blk_id = 
+    ctxt.live_objs blk_id |> function 
+    | None -> return None
+    | Some x -> (!live_obj_to_meta) x |> fun x -> return (Some x)
+
+end
+
+module Kind_2 : KIND with type 'a m = 'a Monad.m and type blk_id = blk_id = Kind_1
+
+module Kind = Kind_1 (* we want to expose the meta types *)
+
+
+module File_1 = struct
+
+  include Monad
+  include Blkdev
+
+  type nonrec ctxt = ctxt
+
+  module T = struct
+    type t = { 
+      ctxt:ctxt; 
+      root:blk_id; 
+      mutable sz:int; 
+      blk_map:Blk_map.t }
+  end
+  include T
+
+  module Tmp = struct
+    type t = { 
+      root:blk_id; 
+      sz:int;
+      blk_map_root:blk_id }[@@deriving sexp]
+    let of_t t = { root=t.T.root; sz=t.sz; blk_map_root=Blk_map.root t.blk_map }
+    let to_t ctxt blk_map t = 
+      (* let blk_map = Blk_map.load ctxt (Blk_map.fn t.blk_map_root) in *)
+      { ctxt; T.root=t.root; sz=t.sz; blk_map }
+  end
+
+  let create ctxt blk_id = 
+    Freelist.alloc ctxt.freelist >>= fun x -> 
+    Blk_map.create ctxt x >>= fun blk_map ->
+    return {ctxt;root=blk_id;sz=0;blk_map}
+
+  let fn blk_id = Printf.sprintf "file_%d" blk_id
+
+  let save t = 
+    Blk_map.save t.blk_map;
+    t |> Tmp.of_t |> Tmp.sexp_of_t |> Sexplib.Sexp.save_hum (fn t.root)
+
+  let load ctxt fn =
+    assert(Sys.file_exists fn);
+    Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> fun tmp -> 
+    Blk_map.(load ctxt (fn tmp.blk_map_root)) |> fun blk_map -> 
+    Tmp.to_t ctxt blk_map tmp
+
+  let open_ ctxt blk_id = load ctxt (fn blk_id) |> fun x -> return (Some x)
+
+  let read_blkid t i = 
+    Blk_map.get_blkid t.blk_map i >>= function
+    | None -> 
+      (* allocate new blk and return *)
+      Freelist.alloc t.ctxt.freelist >>= fun blk_id ->
+      Blk_map.set_blkid t.blk_map i blk_id >>= fun () ->
+      return blk_id
+    | Some blk_id -> return blk_id
+
+  let read_blk t i = 
+    read_blkid t i >>= fun blk_id -> 
+    Blkdev.read blk_id
+
+  let write_blk t i blk =    
+    read_blkid t i >>= fun blk_id -> 
+    Blkdev.write blk_id blk
+
+  let reveal_blk t i = 
+    let blk_i = i / blk_sz in
+    read_blkid t blk_i >>= fun blk_id -> 
+    Blkdev.read blk_id >>= fun blk -> 
+    return (blk_id,blk, i mod blk_sz)
+  
+  (** NOTE see explanation in pread.txt *)  
+  type pread_t = { 
+    off0    : int; (* offset within the file *)
+    len0    : int; (* initial length of data to read *)
+    blk     : int; (* index of the block we are focused on; 0,1,2... *)
+    blkoff  : int; (* offset within the block *)
+    len_rem : int; (* total amount of data remaining to read from that point *)
+    len     : int; (* data to read from this block *)
+    dst_off : int; (* position in dst buffer where we place the data we read *)    
+  }     
+
+  (* obviously a lot of these calculations could be simplified *)
+  let rec calculate_reads ~off0 ~len0 ~dst_off0 = 
+    match len0 = 0 with 
+    | true -> []
+    | false -> 
+      let blk = off0 / blk_sz in
+      let blkoff = off0 mod blk_sz in
+      let len_rem = len0 in
+      let len = min len_rem (blk_sz - blkoff) in
+      let dst_off = dst_off0 in
+      let r = { off0; len0; blk; blkoff; len_rem; len; dst_off } in
+      r :: calculate_reads ~off0:(off0+len) ~len0:(len0 - len) ~dst_off0:(dst_off + len)
+
+  let empty_buf = Bigstringaf.create 0
+
+  let pread t ~off:off0 ~len:len0 =
+    (* create a bigstring to hold the result; may be over long in case
+       there are not enough bytes; perhaps a FIXME? *)
+    match off0 >= t.sz with 
+    | true -> return empty_buf
+    | false -> 
+      (* can't read past the end of the file *)
+      let len0 = min len0 (t.sz - off0) in
+      let buf = Bigstringaf.create len0 in
+      (* we separate into two stages; first stage, we calculate where we
+         need to read; second stage we perform the actual reads; this
+         allows us to take advantage of possible future parallelism *)
+      let reads = calculate_reads ~off0 ~len0 ~dst_off0:0 in
+      begin 
+        reads  |> iter_k (fun ~k reads -> 
+          match reads with
+          | [] -> return buf
+          | r::rest -> 
+            read_blk t r.blk >>= fun blk -> 
+            Bigstringaf.blit blk ~src_off:r.blkoff buf ~dst_off:r.dst_off ~len:r.len;
+            k rest)
+      end
+
+  type pwrite_t = {
+    off0    : int; (* offset within the file *)
+    len0    : int; (* initial length of data to write *)
+    bufoff  : int; (* offset within buf *)
+    blk     : int; (* index of the block we are focused on; 0,1,2... *)
+    blkoff  : int; (* offset within the block *)
+    len     : int; (* data to write to this block at blkoff *)
+  }
+
+  let rec calculate_writes ~off0 ~len0 ~bufoff0 =
+    match len0 = 0 with
+    | true -> []
+    | false -> 
+      let bufoff = bufoff0 in
+      let blk = off0 / blk_sz in
+      let blkoff = off0 mod blk_sz in
+      let len = min len0 (blk_sz - blkoff) in
+      let r = { off0; len0; bufoff; blk; blkoff; len } in
+      r :: calculate_writes ~off0:(off0+len) ~len0:(len0 - len) ~bufoff0:(bufoff0+len)
+
+  let pwrite ~buf ~dst ~dst_off = 
+    let len0 = Bigstringaf.length buf in
+    match len0 > 0 with
+    | false -> return ()
+    | true -> 
+      let writes = calculate_writes ~off0:dst_off ~len0 ~bufoff0:0 in
+      writes |> iter_k (fun ~k writes -> 
+          match writes with
+          | [] -> 
+            (* remember to update size! *)
+            dst.sz <- max dst.sz (dst_off + len0);
+            save dst; (* FIXME? *)
+            return ()
+          | w::rest -> 
+            read_blk dst w.blk >>= fun blk -> 
+            Bigstringaf.blit buf ~src_off:w.bufoff blk ~dst_off:w.blkoff ~len:w.len;
+            write_blk dst w.blk blk >>= fun () -> 
+            k rest)    
+      
+end
 

@@ -86,23 +86,29 @@ module type INT_MAP = sig
   type 'a m
   type t
   type blk_id
+  type ctxt
 
   type k := int
   type v := int
 
-  val create   : blk_id -> t m
-  val open_    : blk_id -> t option m
+  (* FIXME if we have ctxt, we might prefer to get init blk_id from freelist; so make blk_id optional? *)
+  val create   : ctxt -> blk_id -> t m
+  val open_    : ctxt -> blk_id -> t option m
 
-  val destroy  : t -> unit m
-  (** Free underlying blks *)
+  val root     : t -> blk_id
+
 
   val height   : t -> int  (** height of the underlying tree on disk *)
 
   val find_opt : t -> k -> v option m
-  val replace  : t -> k -> v -> unit
-  val delete   : t -> k -> unit
+  val replace  : t -> k -> v -> unit m
+  val delete   : t -> k -> unit m
 
   val sync     : t -> unit m
+
+  
+  val destroy  : t -> unit m
+  (** Free underlying blks *)
 
   val debug_used_blks: t -> blk_id list m
 end
@@ -113,22 +119,25 @@ end
 module type BLK_MAP = sig
   type 'a m
   type blk_id
+  type ctxt
 
   type t (* = { root: blk_id of int_map } *)
 
-  val create: blk_id -> t m
-  val open_ : blk_id -> t option m
+  val create: ctxt -> blk_id -> t m
+  val open_ : ctxt -> blk_id -> t option m
+
+  val root : t -> blk_id
 
   val height: t -> int  (** height of the underlying tree on disk *)
 
-  val set_blkid: int -> blk_id -> unit
+  val set_blkid: t -> int -> blk_id -> unit m
   (** associate blk_id with a blk index in the file; results in an
      error if there is already a blk associated with the id *)
 
-  val get_blkid: int -> blk_id option
+  val get_blkid: t -> int -> blk_id option m
   (** given a blk index, return the corresponding blk_id *)
 
-  val sync_map : unit -> unit m
+  val sync : t -> unit m
 end
 
 
@@ -140,27 +149,31 @@ module type KIND = sig
   type file_meta
   type dir_meta
 
+  type ctxt
+
   (** NOTE this must be sure to go via the in-memory version of the
-     object if it exists *)
-  val stat : blk_id -> [`F of file_meta | `D of dir_meta ]
+     object if it exists; FIXME do we prefer inodes here? paths? *)
+  val stat : ctxt -> blk_id -> [`F of file_meta | `D of dir_meta ] option m
 end
 
 
 (** A file maintains a map from blk index to blk_id, a sz, and
    possibly other metadata *)
 module type FILE = sig
+  type 'a m
+  type blk
+  type blk_id
+  type ctxt
 
   type t (* = { blk_map:Blk_map.t; sz:int }; on disk we have a blk
             that has a pointer to the blk_map, a sz field, and
             possibly some other metadata *)
-  type blk
-  type blk_id
-  type 'a m
 
-  val create    : blk_id -> t m
+
+  val create    : ctxt -> blk_id -> t m
   (** Create a new file, rooted at the given blk_id *)
 
-  val open_     : blk_id -> t option m
+  val open_     : ctxt -> blk_id -> t option m
 
   val read_blk  : t -> int -> blk m
   (** This will allocate a new blk_id if needed *)
@@ -168,23 +181,26 @@ module type FILE = sig
   val write_blk : t -> int -> blk -> unit m
   (** This will allocate a new blk_id if needed *)
 
-  val used_blks : t -> blk_id list m
+  (* val used_blks : t -> blk_id list m *)
+  val reveal_blk : t -> int -> (blk_id * blk * int) m
+  (** Given a position in the file, reveal the underlying blk and the
+      position within the blk (presumably for further read/write) *)
 
   val pread     : t -> off:int -> len: int -> bigstring m
-  val pwrite    : t -> src:bigstring -> src_off:int -> src_len:int -> dst_off:int -> unit m
+
+  (* use bigstring slice rather than off, len *)
+  val pwrite    : buf:bigstring -> dst:t -> dst_off:int -> unit m
 
   val read      : t -> pos:int ref -> len:int -> bytes m
   (** Starting from the pos, read exactly len bytes (unless there are
      less than len available, in which case read as much as possible);
-     update pos as a side effect *)
+     update pos as a side effect FIXME perhaps the caller should
+     provide the bytes, so they can be reused in future calls *)
 
   val write     : t -> pos:int ref -> bytes -> unit m
   (** Starting from pos, write all the bytes given; update pos as a
      side effect *)
 
-  val reveal_blk : t -> int -> blk_id * blk * int
-  (** Given a position in the file, reveal the underlying blk and the
-      position within the blk (presumably for further read/write) *)
 
   val get_sz    : int
   val set_sz    : int -> unit

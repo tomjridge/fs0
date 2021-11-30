@@ -1,0 +1,56 @@
+This is a digram to explain the calculations for pread, pwrite etc
+
+
+File consists of blocks as so:   
+                                 
+  +-------+-------+-------+-----+
+  | blk 0 | blk 1 | blk 2 | ... |
+  +-------+-------+-------+-----+
+  
+For pread, we want to read from offset off, length len bytes
+
+This starts as blk n, where n = off / blk_sz
+
+
+Suppose off = blk_sz * 2 + delta where delta << blk_sz
+
+  +-------+-------+-------+-----+
+  | blk 0 | blk 1 | blk 2 | ... |
+  +-------+-------+-------+-----+
+                     ^
+                     off (at posn delta in blk 2)
+
+Then similarly, off+len:
+
+  +-------+-------+-------+-----+-------+-----+
+  | blk 0 | blk 1 | blk 2 | ... | blk n | ... |
+  +-------+-------+-------+-----+-------+-----+
+                     ^             ^          
+                     off           off+len
+          
+          
+Then we need to read (blk_sz - delta) bytes from blk 2, then all the blocks
+upto blk (n-1). For blk n, we need to read upto (off+len) mod blk_sz.
+          
+For pread, we need to place the resulting data into the returned buffer at
+the appropriate place.           
+          
+Original offset: OFF
+Original length: L 
+Initial block: m (where OFF / blk_sz = m)
+                                         
+                                         
+| Block |        Blk off | Len                      | Dst off          |
+|-------+----------------+--------------------------+------------------|
+| m     | off mod blk_sz | blk_sz - blk_off (=len0) | 0                |
+| m+1   |              0 | blk_sz                   | len0             |
+| m+2   |              0 | blk_sz                   | len0+blk_sz      |
+| ...   |                |                          |                  |
+| n     |              0 | L mod blk_sz             | len0+(n-3)blk_sz |
+|       |                |                          |                  |
+          
+[NOTE this assumes at least 2 blocks involved; the degenerate case
+occurs when off and off+len are in the same block]
+                                               
+
+                                                                               

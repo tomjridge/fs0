@@ -44,3 +44,5 @@ let coerce_ba_i2c arr_i =
   let arr_c = coerce_bigarray1 Ctypes.camlint Ctypes.char Bigarray.Char arr_i in
   arr_c
 
+
+module Int_map = Map.Make(Int)
