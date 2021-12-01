@@ -2,6 +2,12 @@ type int_bigarray = (int,Bigarray.int_elt,Bigarray.c_layout)Bigarray.Array1.t
 type bigarray_int = int_bigarray
 type bigstring = Bigstringaf.t
 
+module Times = struct
+  open Sexplib.Std
+  type t = { atim:float; mtim:float }[@@deriving sexp]
+  (* NOTE at the moment we only modify mtim *)
+end
+
 module type MONAD = sig
   type 'a m
   val ( >>= ) : 'a m -> ('a -> 'b m) -> 'b m
@@ -205,6 +211,8 @@ module type FILE = sig
   val get_sz       : t -> int
   (* val set_sz    : int -> unit not in public intf *)
 
+  val get_times    : t -> Times.t
+
   val sync         : t -> unit m
 end
 
@@ -265,7 +273,7 @@ module type DIR = sig
   val replace       : t -> k -> v -> unit m
   val delete        : t -> k -> unit m
 
-
+  val get_times     : t -> Times.t
 
   (** Directory handles *)
 
@@ -278,5 +286,53 @@ module type DIR = sig
      a certain small number of entries are returned, which can safely
      be dealt with by non-tail-recursive functions *)
   val close_dh      : dh -> unit
+
+end
+
+
+(** A filesystem is then a store of directories and files. Some of the
+   objects are "live" in memory, and the rest are stored on disk.
+
+    The ctxt that is used in earlier sigs is in fact derived from this fs object.
+ *)
+module type FS = sig
+  type 'a m
+  type blk_id
+
+  type file (* live, in memory; equal to FILE.t *)
+  type dir (* live, in memory; equal to DIR.t *)
+
+  type file_meta (* from KIND *)
+  type dir_meta (* from KIND *)
+
+  type t (* equal to Runtime_context.t *)
+
+  (* block id that stores the root directory *)
+  val root : t -> blk_id
+
+(*
+  val get_dir: t -> blk_id -> dir
+  val get_file: t -> blk_id -> file
+*)
+    
+  val stat: t -> blk_id -> [`F of file_meta | `D of dir_meta ] option m
+
+(*      
+  (* pin an object in memory; this ensures that in-memory refs are
+     valid and the object can't be removed from memory; each blk_id
+     has an associated number of pins; when the pins reach 0, the
+     object can be removed from memory; this avoids the problem that
+     the fs removes an object from memory, but a user still has a
+     handle to the object... which is then brought back into memory
+     from disk and there are now two instances of the object in memory *)
+  val pin: t -> blk_id -> unit
+  val unpin: t -> blk_id -> unit
+*)
+
+  (* the following with_... functions pin the file in memory for the
+     duration of f *)
+
+  val with_file : t -> blk_id -> f:(file -> unit m) -> unit
+  val with_dir  : t -> blk_id -> f:(dir -> unit m) -> unit
 
 end

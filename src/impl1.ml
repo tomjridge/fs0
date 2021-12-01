@@ -163,6 +163,7 @@ module Runtime_context = struct
 
   (* NOTE we don't have file and dir types yet; we fill them in later *)
   type t = { 
+    now: unit -> Times.t;
     freelist: Freelist.t; 
     (* blkdev:Blkdev.t;  only 1 blkdev *)
     live_objs:blk_id -> [ `F of file | `D of dir ] option;
@@ -304,6 +305,7 @@ module File_1 = struct
       ctxt:ctxt; 
       root:blk_id; 
       mutable sz:int; 
+      mutable times:Times.t;
       blk_map:Blk_map.t }
   end
   include T
@@ -312,13 +314,20 @@ module File_1 = struct
     type t = { 
       root:blk_id; 
       sz:int;
+      times:Times.t;
       blk_map_root:blk_id }[@@deriving sexp]
-    let of_t t = { root=t.T.root; sz=t.sz; blk_map_root=Blk_map.root t.blk_map }
+    let of_t t = 
+      { root=t.T.root; sz=t.sz; times=t.times; blk_map_root=Blk_map.root t.blk_map }
     let to_t ctxt blk_map t = 
       (* let blk_map = Blk_map.load ctxt (Blk_map.fn t.blk_map_root) in *)
-      { ctxt; T.root=t.root; sz=t.sz; blk_map }
+      { ctxt; T.root=t.root; sz=t.sz; times=t.times; blk_map }
   end
 
+  let update_mtim t = 
+    (t.ctxt.now ()).mtim |> fun mtim -> 
+    t.times <- {t.times with mtim};
+    ()
+    
   let fn blk_id = Printf.sprintf "file_%d" blk_id
 
   let save t = 
@@ -334,7 +343,8 @@ module File_1 = struct
   let create ctxt blk_id = 
     Freelist.alloc ctxt.freelist >>= fun x -> 
     Blk_map.create ctxt x >>= fun blk_map ->
-    let t = {ctxt;root=blk_id;sz=0;blk_map} in
+    let times = ctxt.now () in
+    let t = {ctxt;root=blk_id;sz=0;times;blk_map} in
     save t;
     return t
 
@@ -355,7 +365,8 @@ module File_1 = struct
 
   let write_blk t i blk =    
     read_blkid t i >>= fun blk_id -> 
-    Blkdev.write blk_id blk
+    Blkdev.write blk_id blk >>= fun () -> 
+    update_mtim t; return ()
 
   let reveal_blk t i = 
     let blk_i = i / blk_sz in
@@ -441,8 +452,9 @@ module File_1 = struct
       writes |> iter_k (fun ~k writes -> 
           match writes with
           | [] -> 
-            (* remember to update size! *)
+            (* remember to update size and time! *)
             dst.sz <- max dst.sz (dst_off + len0);
+            update_mtim dst;
             save dst; (* FIXME? *)
             return ()
           | w::rest -> 
@@ -457,11 +469,14 @@ module File_1 = struct
     return buf
 
   let write t ~pos ~src =
+    (* NOTE pwrite will update mtim *)
     pwrite t ~src ~dst_off:(!pos) >>= fun () -> 
     pos:=!pos + Bigstringaf.length src;
     return ()
 
   let get_sz t = t.sz
+
+  let get_times t = t.times
 
   let sync t = 
     save t;
@@ -488,15 +503,26 @@ module Dir_1 = struct
   type v = blk_id
 
   module T = struct
-    type t = { ctxt:ctxt; root:blk_id; parent:did; mutable map:map }
+    type t = { 
+      ctxt:ctxt; 
+      root:blk_id; 
+      mutable parent:did; 
+      mutable times:Times.t;
+      mutable map:map 
+    }
   end
   include T
 
   module Tmp = struct
-    type t = { root:blk_id; parent:did; map:(string*blk_id)list }[@@deriving sexp]
-    let of_t t = { root=t.T.root; parent=t.parent; map=Map.bindings t.map }
-    let to_t ctxt t = { T.ctxt=ctxt; root=t.root; parent=t.parent; map=Map.of_seq (List.to_seq t.map) }
+    type t = { root:blk_id; parent:did; times:Times.t; map:(string*blk_id)list }[@@deriving sexp]
+    let of_t t = { root=t.T.root; parent=t.parent; times=t.times; map=Map.bindings t.map }
+    let to_t ctxt t = { T.ctxt=ctxt; root=t.root; parent=t.parent; times=t.times; map=Map.of_seq (List.to_seq t.map) }
   end
+
+  let update_mtim t = 
+    (t.ctxt.now ()).mtim |> fun mtim -> 
+    t.times <- {t.times with mtim};
+    ()
 
   let fn blk_id = Printf.sprintf "dir_%d" blk_id
 
@@ -507,7 +533,7 @@ module Dir_1 = struct
     Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> Tmp.to_t ctxt
 
   let create ctxt ~root ~parent = 
-    let t = { ctxt; root; parent; map=Map.empty } in
+    let t = { ctxt; root; parent; times=ctxt.now(); map=Map.empty } in
     save t;
     return t      
 
@@ -517,9 +543,11 @@ module Dir_1 = struct
 
   let find_opt t k = Map.find_opt k t.map |> return
 
-  let replace t k v = t.map <- Map.add k v t.map; return () 
+  let replace t k v = t.map <- Map.add k v t.map; update_mtim t; return () 
       
-  let delete t k = t.map <- Map.remove k t.map; return ()
+  let delete t k = t.map <- Map.remove k t.map; update_mtim t; return ()
+
+  let get_times t = t.times
 
   (* return entries starting at off, unless we are finished, in which
      case return empty list; note that this allows new entries to be
