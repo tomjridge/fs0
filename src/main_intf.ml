@@ -38,7 +38,8 @@ module type BLKDEV = sig
 
   val write: blk_id -> blk -> unit m
   val read : blk_id -> blk m  
-    
+
+  val sync : unit -> unit m
 end
 
 
@@ -170,46 +171,45 @@ module type FILE = sig
             possibly some other metadata *)
 
 
-  val create    : ctxt -> blk_id -> t m
+  val create       : ctxt -> blk_id -> t m
   (** Create a new file, rooted at the given blk_id *)
 
-  val open_     : ctxt -> blk_id -> t option m
+  val open_        : ctxt -> blk_id -> t option m
 
-  val read_blk  : t -> int -> blk m
+  val read_blk     : t -> int -> blk m
   (** This will allocate a new blk_id if needed *)
 
-  val write_blk : t -> int -> blk -> unit m
+  val write_blk    : t -> int -> blk -> unit m
   (** This will allocate a new blk_id if needed *)
 
   (* val used_blks : t -> blk_id list m *)
-  val reveal_blk : t -> int -> (blk_id * blk * int) m
+  val reveal_blk   : t -> int -> (blk_id * blk * int) m
   (** Given a position in the file, reveal the underlying blk and the
       position within the blk (presumably for further read/write) *)
 
-  val pread     : t -> off:int -> len: int -> bigstring m
+  val pread        : t -> off:int -> len: int -> bigstring m
 
   (* use bigstring slice rather than off, len *)
-  val pwrite    : buf:bigstring -> dst:t -> dst_off:int -> unit m
+  val pwrite       : t -> src:bigstring -> dst_off:int -> unit m
 
-  val read      : t -> pos:int ref -> len:int -> bytes m
+  val read         : t -> pos:int ref -> len:int -> bigstring m
   (** Starting from the pos, read exactly len bytes (unless there are
      less than len available, in which case read as much as possible);
      update pos as a side effect FIXME perhaps the caller should
      provide the bytes, so they can be reused in future calls *)
 
-  val write     : t -> pos:int ref -> bytes -> unit m
+  val write        : t -> pos:int ref -> src:bigstring -> unit m
   (** Starting from pos, write all the bytes given; update pos as a
      side effect *)
 
+  val get_sz       : t -> int
+  (* val set_sz    : int -> unit not in public intf *)
 
-  val get_sz    : int
-  val set_sz    : int -> unit
-
-  val sync : unit -> unit m
+  val sync         : t -> unit m
 end
 
 
-
+(*
 (** A small file can fit sz and data into a single block; first 4
    bytes store length of string; rest is data *)
 module type SMALL_FILE = sig
@@ -221,9 +221,9 @@ module type SMALL_FILE = sig
   val set_data: string -> t
   (** Will only allow shortish strings eg of length 4092 bytes or less *)
   
-  val sync: unit -> unit m
+  val sync: t -> unit m
 end
-
+*)
 
 (** A directory maps names (strings, max len 256) to filesystem
    objects (files or dirs).
@@ -242,9 +242,10 @@ Actually, we also record various other things in a directory such as:
 module type DIR = sig
   type 'a m
   type blk_id
+  type ctxt
 
   type t
-  type k := string
+  type k = string
   type v 
 
   type dh 
@@ -256,14 +257,20 @@ module type DIR = sig
      that most uses will use a fresh blk_id; if this is not the case
      an exception should be thrown *)
 
-  val create        : blk_id -> t m
-  val open_         : blk_id -> t option m
+  val create        : ctxt -> root:blk_id -> parent:blk_id -> t m
+  val open_         : ctxt -> blk_id -> t option m
+  val sync          : t -> unit m
 
   val find_opt      : t -> k -> v option m
   val replace       : t -> k -> v -> unit m
   val delete        : t -> k -> unit m
 
+
+
   (** Directory handles *)
+
+  val readdir_limit : int 
+  (** The max number of entries that can be returned by a readdir call *)
 
   val open_dh       : t -> dh
   val readdir       : dh -> (k*v) list m
@@ -272,6 +279,4 @@ module type DIR = sig
      be dealt with by non-tail-recursive functions *)
   val close_dh      : dh -> unit
 
-  val readdir_limit : int 
-  (** The max number of entries that can be returned by a readdir call *)
 end

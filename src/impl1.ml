@@ -11,8 +11,8 @@ module Monad : MONAD = struct
   let ( >>= ) a b = b a
 
   let return x = x
-
 end
+open Monad
 
 module Blkdev_1 = struct
 
@@ -55,6 +55,10 @@ module Blkdev_1 = struct
   let write blk_id blk =
     assert(Hashtbl.find_opt blks blk_id = Some blk);
     return ()
+
+  let sync () = 
+    Printf.printf "Blkdev sync called FIXME\n";
+    return ()    
 
 end
 
@@ -161,7 +165,9 @@ module Runtime_context = struct
   type t = { 
     freelist: Freelist.t; 
     (* blkdev:Blkdev.t;  only 1 blkdev *)
-    live_objs:blk_id -> [ `F of file | `D of dir ] option }
+    live_objs:blk_id -> [ `F of file | `D of dir ] option;
+    sync_fs: unit -> unit m  (* sync the entire filesystem *)
+}
 
   type ctxt = t
 
@@ -313,11 +319,6 @@ module File_1 = struct
       { ctxt; T.root=t.root; sz=t.sz; blk_map }
   end
 
-  let create ctxt blk_id = 
-    Freelist.alloc ctxt.freelist >>= fun x -> 
-    Blk_map.create ctxt x >>= fun blk_map ->
-    return {ctxt;root=blk_id;sz=0;blk_map}
-
   let fn blk_id = Printf.sprintf "file_%d" blk_id
 
   let save t = 
@@ -329,6 +330,13 @@ module File_1 = struct
     Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> fun tmp -> 
     Blk_map.(load ctxt (fn tmp.blk_map_root)) |> fun blk_map -> 
     Tmp.to_t ctxt blk_map tmp
+
+  let create ctxt blk_id = 
+    Freelist.alloc ctxt.freelist >>= fun x -> 
+    Blk_map.create ctxt x >>= fun blk_map ->
+    let t = {ctxt;root=blk_id;sz=0;blk_map} in
+    save t;
+    return t
 
   let open_ ctxt blk_id = load ctxt (fn blk_id) |> fun x -> return (Some x)
 
@@ -424,7 +432,7 @@ module File_1 = struct
       let r = { off0; len0; bufoff; blk; blkoff; len } in
       r :: calculate_writes ~off0:(off0+len) ~len0:(len0 - len) ~bufoff0:(bufoff0+len)
 
-  let pwrite ~buf ~dst ~dst_off = 
+  let pwrite dst ~src:buf ~dst_off = 
     let len0 = Bigstringaf.length buf in
     match len0 > 0 with
     | false -> return ()
@@ -442,6 +450,106 @@ module File_1 = struct
             Bigstringaf.blit buf ~src_off:w.bufoff blk ~dst_off:w.blkoff ~len:w.len;
             write_blk dst w.blk blk >>= fun () -> 
             k rest)    
+
+  let read t ~pos ~len =
+    pread t ~off:(!pos) ~len >>= fun buf -> 
+    pos:=!pos + Bigstringaf.length buf;
+    return buf
+
+  let write t ~pos ~src =
+    pwrite t ~src ~dst_off:(!pos) >>= fun () -> 
+    pos:=!pos + Bigstringaf.length src;
+    return ()
+
+  let get_sz t = t.sz
+
+  let sync t = 
+    save t;
+    return ()
       
 end
 
+module File 
+  : FILE with type 'a m='a m and type blk=blk and type blk_id=blk_id and type ctxt=ctxt
+  = File_1
+
+
+module Dir_1 = struct
+  type nonrec 'a m = 'a m
+  type nonrec blk_id = blk_id
+  type nonrec ctxt = ctxt
+      
+  type did (* dir id *)  = blk_id[@@deriving sexp]
+  type fid (* file id *) = blk_id 
+  module Map = String_map
+  type map = blk_id Map.t
+
+  type k = string
+  type v = blk_id
+
+  module T = struct
+    type t = { ctxt:ctxt; root:blk_id; parent:did; mutable map:map }
+  end
+  include T
+
+  module Tmp = struct
+    type t = { root:blk_id; parent:did; map:(string*blk_id)list }[@@deriving sexp]
+    let of_t t = { root=t.T.root; parent=t.parent; map=Map.bindings t.map }
+    let to_t ctxt t = { T.ctxt=ctxt; root=t.root; parent=t.parent; map=Map.of_seq (List.to_seq t.map) }
+  end
+
+  let fn blk_id = Printf.sprintf "dir_%d" blk_id
+
+  let save t = 
+    t |> Tmp.of_t |> Tmp.sexp_of_t |> Sexplib.Sexp.save_hum (fn t.root)
+
+  let load ctxt fn =
+    Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> Tmp.to_t ctxt
+
+  let create ctxt ~root ~parent = 
+    let t = { ctxt; root; parent; map=Map.empty } in
+    save t;
+    return t      
+
+  let open_ ctxt root = load ctxt (fn root) |> fun x -> return (Some x)
+
+  let sync t = save t; return ()
+
+  let find_opt t k = Map.find_opt k t.map |> return
+
+  let replace t k v = t.map <- Map.add k v t.map; return () 
+      
+  let delete t k = t.map <- Map.remove k t.map; return ()
+
+  (* return entries starting at off, unless we are finished, in which
+     case return empty list; note that this allows new entries to be
+     returned, and entries are returned in lex order *)
+  type dh = { t:t; mutable off:string; mutable finished:bool; mutable closed:bool }
+
+  let readdir_limit = 4096 (* for example *)
+
+  let open_dh t = { t; off=""; finished=false; closed=false }
+  (* we assume "" is not a valid name in a directory, and that it is
+     minimal in the string ordering (it should be!) *)
+
+  let readdir dh =
+    assert(not dh.closed);
+    match dh.finished with 
+    | true -> return []
+    | false -> 
+      Map.to_seq_from dh.off dh.t.map |> seq_take (readdir_limit+1) |> fun xs -> 
+      let xs = List.rev xs in
+      (* drop last entry read, but remember to read from that point in future *)
+      let xs = 
+        match xs with 
+        | [] -> dh.finished <- true; xs
+        | (x,_)::xs -> dh.off <- x; xs
+      in
+      return (List.rev xs)
+
+  let close_dh dh = dh.closed <- true; ()
+end
+
+module Dir 
+  : DIR with type 'a m='a m and type blk_id=blk_id and type ctxt=ctxt
+  = Dir_1

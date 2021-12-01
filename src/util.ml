@@ -46,3 +46,15 @@ let coerce_ba_i2c arr_i =
 
 
 module Int_map = Map.Make(Int)
+
+module String_map = Map.Make(String)
+
+
+let rec seq_take n seq = 
+  match n <= 0 with 
+  | true -> []
+  | false -> 
+    seq () |> function 
+    | Seq.Nil -> []
+    | Seq.Cons(a,seq) -> 
+      a :: seq_take (n-1) seq
