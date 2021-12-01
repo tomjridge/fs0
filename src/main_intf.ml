@@ -265,6 +265,8 @@ module type DIR = sig
      that most uses will use a fresh blk_id; if this is not the case
      an exception should be thrown *)
 
+  (* FIXME perhaps use term "anchor" to represent root block *)
+
   val create        : ctxt -> root:blk_id -> parent:blk_id -> t m
   val open_         : ctxt -> blk_id -> t option m
   val sync          : t -> unit m
@@ -309,30 +311,24 @@ module type FS = sig
 
   (* block id that stores the root directory *)
   val root : t -> blk_id
-
-(*
-  val get_dir: t -> blk_id -> dir
-  val get_file: t -> blk_id -> file
-*)
     
   val stat: t -> blk_id -> [`F of file_meta | `D of dir_meta ] option m
-
-(*      
-  (* pin an object in memory; this ensures that in-memory refs are
-     valid and the object can't be removed from memory; each blk_id
-     has an associated number of pins; when the pins reach 0, the
-     object can be removed from memory; this avoids the problem that
-     the fs removes an object from memory, but a user still has a
-     handle to the object... which is then brought back into memory
-     from disk and there are now two instances of the object in memory *)
-  val pin: t -> blk_id -> unit
-  val unpin: t -> blk_id -> unit
-*)
 
   (* the following with_... functions pin the file in memory for the
      duration of f *)
 
-  val with_file : t -> blk_id -> f:(file -> unit m) -> unit
-  val with_dir  : t -> blk_id -> f:(dir -> unit m) -> unit
+  val with_file   : t -> blk_id -> f:(file -> 'a m) -> 'a m
+  val with_dir    : t -> blk_id -> f:(dir -> 'a m) -> 'a m
 
+  val create_file : t -> dir -> string -> file m
+  val create_dir  : t -> parent:dir -> string -> dir m
+
+  (* FIXME what do we do about deleting? need to count links for
+     files; need to ensure parent doesn't reference a dir that we
+     delete *)  
+  val delete_file : t -> blk_id -> unit m
+  val delete_dir  : t -> blk_id -> unit m
+
+  (** The following should sync all file and dir objects as well *)
+  val sync        : t -> unit m
 end

@@ -163,23 +163,15 @@ module Runtime_context = struct
 
   (* NOTE we don't have file and dir types yet; we fill them in later *)
   type t = { 
-    now: unit -> Times.t;
-    freelist: Freelist.t; 
-    (* blkdev:Blkdev.t;  only 1 blkdev *)
-    live_objs:blk_id -> [ `F of file | `D of dir ] option;
-    sync_fs: unit -> unit m  (* sync the entire filesystem *)
-}
+    now        : unit -> Times.t;
+    freelist   : Freelist.t; 
+    live_objs  : blk_id -> [ `F of file | `D of dir ] option;
+  }
+    (* sync_fs : unit -> unit m  (\* sync the entire filesystem *\) *)
+    (* blkdev  :Blkdev.t;  only 1 blkdev *)
 
   type ctxt = t
 
-(*
-  let the_ctxt = ref None
-
-  let ctxt () : _ t = 
-    match !the_ctxt with 
-    | None -> failwith __LOC__
-    | Some x -> x
-*)
 end
 open Runtime_context
 
