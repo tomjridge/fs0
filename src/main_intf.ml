@@ -177,11 +177,11 @@ module type KIND = sig
   type file_meta
   type dir_meta
 
-  type ctxt
+  (** A stat function should take a blk_id (presumably the root of
+     either a file or a directory) and return the associated metadata
+     *)
+  type stat_fun_t = blk_id -> [`F of file_meta | `D of dir_meta ] option m
 
-  (** NOTE this must be sure to go via the in-memory version of the
-     object if it exists; FIXME do we prefer inodes here? paths? *)
-  val stat : ctxt -> blk_id -> [`F of file_meta | `D of dir_meta ] option m
 end
 
 

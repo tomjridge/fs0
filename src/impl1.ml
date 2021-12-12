@@ -312,11 +312,8 @@ module Kind_1 = struct
 
   type dir_meta = { d_ino:blk_id; d_size:int } (* size is the number of entries *)
 
-  type ctxt = {
-    stat: blk_id -> [`F of file_meta | `D of dir_meta ] option m
-  }
-
-  let stat ctxt blk_id = ctxt.stat blk_id
+  type stat_fun_t = blk_id -> [`F of file_meta | `D of dir_meta ] option m
+  
 end
 
 module Kind_2 : KIND with type 'a m = 'a Monad.m and type blk_id = blk_id = Kind_1
