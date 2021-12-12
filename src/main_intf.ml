@@ -14,10 +14,34 @@ module type MONAD = sig
   val return : 'a -> 'a m
 end
 
-module type BLKDEV = sig
-  
-  type 'a m
+module type BLK = sig
+  type ctxt
+
   type blk = bigstring
+
+  val create: ?clean:char -> ctxt -> blk
+  val blk_sz: blk -> int
+  val fill: char -> blk -> unit
+
+
+  type blk_int = int_bigarray
+
+  val create_int: ?clean:int -> ctxt -> blk_int
+  val blk_sz_int: blk_int -> int
+  val fill_int: int -> blk_int -> unit
+
+  (* Conversions *)
+  val to_blk_int : blk -> blk_int
+  val to_blk     : blk_int -> blk
+end
+
+module type BLKDEV = sig
+  type ctxt
+
+  type 'a m
+
+  type blk = bigstring
+
   type blk_id (* = int, with -1 representing "None" *)
 
   val blk_id_none : blk_id 
@@ -31,19 +55,16 @@ module type BLKDEV = sig
      efficiency and ease of interaction with int arrays, we prefer not
      to use an option type here *)
 
-  val blk_sz: int (* size in bytes *)
+
+  type t
 
   (** A blk is normally a bigstring, but we can cast to a bigarray of
      int; the underlying piece of memory is shared of course, so these
      casts happen purely at the type level and have no runtime cost or
      significance *)
-  type blk_int = bigarray_int
-  val to_blk_int : blk -> blk_int
-  val blk_sz_int : int  (* blk_int size *)
-  val to_blk     : blk_int -> blk
 
-  val write: blk_id -> blk -> unit m
-  val read : blk_id -> blk m  
+  val write: t -> blk_id -> blk -> unit m
+  val read : t -> blk_id -> blk m  
 
   val sync : unit -> unit m
 end
@@ -64,11 +85,11 @@ module type FREELIST = sig
   val create     : blk_id -> t m
   val open_      : blk_id -> t option m
 
-
-  val alloc      : ?clean:[`Char of char | `Int of int] -> t -> blk_id m
+  (* FIXME this should just return blk_id, without even writing to the store *)
+  val alloc      : t -> blk_id m
   val free       : t -> blk_id -> unit m
 
-  val alloc_many : ?clean:[`Char of char | `Int of int] -> t -> int -> blk_id list m
+  val alloc_many : t -> int -> blk_id list m
   val free_many  : t -> blk_id list -> unit m  
 
   val debug_used_blks  : t -> blk_id list m
@@ -128,7 +149,7 @@ module type BLK_MAP = sig
   type blk_id
   type ctxt
 
-  type t (* = { root: blk_id of int_map } *)
+  type t 
 
   val create: ctxt -> blk_id -> t m
   val open_ : ctxt -> blk_id -> t option m
@@ -188,10 +209,12 @@ module type FILE = sig
   val write_blk    : t -> int -> blk -> unit m
   (** This will allocate a new blk_id if needed *)
 
+(*
   (* val used_blks : t -> blk_id list m *)
   val reveal_blk   : t -> int -> (blk_id * blk * int) m
   (** Given a position in the file, reveal the underlying blk and the
       position within the blk (presumably for further read/write) *)
+*)
 
   val pread        : t -> off:int -> len: int -> bigstring m
 

@@ -14,7 +14,57 @@ module Monad : MONAD = struct
 end
 open Monad
 
+module Blk_1 = struct
+
+  type ctxt = {
+    blk_sz: int;
+    blk_sz_int: int
+  }
+
+  (* check we are on 64bit arch *)
+  let _ = assert(Sys.word_size = 64)
+
+  let ctxt0 = 
+    {
+      blk_sz=4096;
+      blk_sz_int=(4096 / 8)
+    }
+
+  type blk = bigstring
+
+  let create : ?clean:char -> ctxt -> blk = fun ?clean ctxt ->
+    let blk = Bigstringaf.create ctxt.blk_sz in
+    (match clean with None -> () | Some c -> Bigarray.Array1.fill blk c);
+    blk
+
+  (* FIXME we aren't really using much from bigstringaf *)
+  let blk_sz blk = Bigstringaf.length blk
+
+  let fill c blk = Bigarray.Array1.fill blk c
+
+  type blk_int = int_bigarray
+
+  let to_blk_int (blk:blk) : blk_int = Util.coerce_ba_c2i blk
+      
+  let to_blk (blk:blk_int) : blk = Util.coerce_ba_i2c blk
+
+  let create_int : ?clean:int -> ctxt -> blk_int = fun ?clean ctxt -> 
+    let blk = Bigarray.(Array1.create int Bigarray.c_layout ctxt.blk_sz_int) in
+    (match clean with None -> () | Some i -> Bigarray.Array1.fill blk i);
+    blk
+
+  let blk_sz_int blk = Bigarray.Array1.dim blk
+
+  let fill_int i blk = Bigarray.Array1.fill blk i
+
+end
+
+module Blk : BLK = Blk_1
+
+type blk = Blk.blk
+
 module Blkdev_1 = struct
+  type ctxt = Blk.ctxt
 
   include Monad
 
@@ -26,34 +76,23 @@ module Blkdev_1 = struct
 
   let blk_id_is_some x = x>=0
 
-  let blk_sz = 4096
 
-  type blk_int = bigarray_int
+  type t = { ctxt:ctxt; blks:(blk_id,blk) Hashtbl.t }
 
-  let to_blk_int (blk:blk) : blk_int = Util.coerce_ba_c2i blk
-      
-  (* check we are on 64bit arch *)
-  let _ = assert(Sys.int_size = 8)
-
-  let blk_sz_int = blk_sz / 8 
-
-  let to_blk (blk:blk_int) : blk = Util.coerce_ba_i2c blk
-
-  let blks = Hashtbl.create 100
-
-  let read blk_id = 
-    (match Hashtbl.find_opt blks blk_id with
+  let read t blk_id = 
+    (match Hashtbl.find_opt t.blks blk_id with
      | None -> 
-       (Bigstringaf.create blk_sz) |> fun blk -> 
-       Hashtbl.replace blks blk_id blk;
-       blk
+       failwith "Attempt to read a blk that has not previously been written"
+(*       (Blk.create t.ctxt) |> fun blk -> 
+       Hashtbl.replace t.blks blk_id blk;
+       blk *)
      | Some blk -> blk)
     |> return
 
   (* NOTE we currently enforce that you can't write blk to a blk_id
      different from that when it was created *)
-  let write blk_id blk =
-    assert(Hashtbl.find_opt blks blk_id = Some blk);
+  let write t blk_id blk =
+    assert(Hashtbl.find_opt t.blks blk_id = Some blk);
     return ()
 
   let sync () = 
@@ -67,7 +106,7 @@ module Blkdev : sig
   type blk_id = int[@@deriving sexp]
 end = Blkdev_1
 
-open Blkdev
+type blk_id = Blkdev.blk_id[@@deriving sexp]
 
 module _ : BLKDEV = Blkdev
 
@@ -109,8 +148,9 @@ module Freelist_1 = struct
       save t;
       return x
 
-  let alloc ?clean t = 
+  let alloc t = 
     alloc' t >>= fun blk_id -> 
+(*
     let blk = Bigstringaf.create blk_sz in
     let blk_int = to_blk_int blk in
     begin
@@ -122,6 +162,7 @@ module Freelist_1 = struct
         for i = 0 to blk_sz do blk_int.{ i } <- j done
     end;
     Blkdev.write blk_id blk >>= fun () -> 
+*)
     return blk_id
 
   let free t blk_id = 
@@ -129,12 +170,12 @@ module Freelist_1 = struct
     save t;
     return ()
 
-  let alloc_many ?clean t i =
+  let alloc_many t i =
     (0,[]) |> iter_k (fun ~k (j,ids) -> 
         match j >= i with 
         | true -> return ids
         | false -> 
-          alloc ?clean t >>= fun id -> 
+          alloc t >>= fun id -> 
           k (j+1,id::ids))
 
   let rec free_many t ids =
@@ -144,8 +185,8 @@ module Freelist_1 = struct
 
   let debug_used_blks t = return [t.blk_id]
   
-
 end
+
 
 module Freelist : sig
   include FREELIST with type 'a m = 'a Monad.m and type blk_id = Blkdev.blk_id
@@ -155,6 +196,7 @@ end = Freelist_1
 module _ : FREELIST = Freelist
 
 
+(*
 module Runtime_context = struct
 
   (* These will be filled in later *)
@@ -174,14 +216,16 @@ module Runtime_context = struct
 
 end
 open Runtime_context
-
+*)
 
 module Int_map_1 = struct
 
   include Monad
 
   type blk_id = Blkdev.blk_id
-  type ctxt = Runtime_context.t
+  type ctxt = {
+    free_many: blk_id list -> unit;
+  }
                   
   module T = struct
     type t = { ctxt:ctxt; blk_id: blk_id; mutable map:int Int_map.t }      
@@ -216,7 +260,8 @@ module Int_map_1 = struct
 
   let destroy t = 
     debug_used_blks t >>= fun xs -> 
-    Freelist.free_many t.ctxt.freelist xs
+    t.ctxt.free_many xs;
+    return ()
 
   let height t = 
     Int_map.cardinal t.map |> Base.Int.ceil_log2
@@ -232,7 +277,7 @@ module Int_map_1 = struct
 end
 
 module Int_map' : sig
-  include INT_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=ctxt
+  include INT_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=Int_map_1.ctxt
 end = Int_map_1
 
 module Int_map = Int_map_1 (* expose load/save *)
@@ -251,33 +296,27 @@ module Blk_map_1 = struct
 end
 
 module Blk_map' : sig
-  include BLK_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=ctxt
+  include BLK_MAP with type 'a m = 'a Monad.m and type blk_id = blk_id and type ctxt=Int_map_1.ctxt
 end = Blk_map_1
 
 module Blk_map = Blk_map_1  (* expose additional functions *)
 
 
-
+(* FIXME perhaps the stat function is just part of the ctxt *)
 module Kind_1 = struct
   include Monad
   type blk_id = Blkdev.blk_id
-  type ctxt = Runtime_context.t
 
   type file_meta = { f_ino:blk_id; f_size:int; f_nlink:int }  
   (* let's associate the inode number with the root blk_id *)
 
   type dir_meta = { d_ino:blk_id; d_size:int } (* size is the number of entries *)
 
-  (* NOTE patched later *)
-  let live_obj_to_meta : ([ `F of 'f | `D of 'd ] -> [`F of file_meta | `D of dir_meta]) ref = ref (fun _x -> failwith "FIXME")
+  type ctxt = {
+    stat: blk_id -> [`F of file_meta | `D of dir_meta ] option m
+  }
 
-  let _ = live_obj_to_meta
-
-  let stat ctxt blk_id = 
-    ctxt.live_objs blk_id |> function 
-    | None -> return None
-    | Some x -> (!live_obj_to_meta) x |> fun x -> return (Some x)
-
+  let stat ctxt blk_id = ctxt.stat blk_id
 end
 
 module Kind_2 : KIND with type 'a m = 'a Monad.m and type blk_id = blk_id = Kind_1
@@ -288,9 +327,18 @@ module Kind = Kind_1 (* we want to expose the meta types *)
 module File_1 = struct
 
   include Monad
-  include Blkdev
 
-  type nonrec ctxt = ctxt
+  type nonrec blk=blk
+  type nonrec blk_id=blk_id
+
+  (* we need "now", and the ctxt from blk_map *)
+  type ctxt = {
+    alloc: unit -> blk_id m;
+    now: unit -> Times.t;
+    free_many: blk_id list -> unit;
+    blkdev: Blkdev.t;
+    blk_sz:int;
+  }
 
   module T = struct
     type t = { 
@@ -298,7 +346,8 @@ module File_1 = struct
       root:blk_id; 
       mutable sz:int; 
       mutable times:Times.t;
-      blk_map:Blk_map.t }
+      blk_map:Blk_map.t 
+    }
   end
   include T
 
@@ -310,7 +359,7 @@ module File_1 = struct
       blk_map_root:blk_id }[@@deriving sexp]
     let of_t t = 
       { root=t.T.root; sz=t.sz; times=t.times; blk_map_root=Blk_map.root t.blk_map }
-    let to_t ctxt blk_map t = 
+    let to_t (ctxt:ctxt) blk_map t = 
       (* let blk_map = Blk_map.load ctxt (Blk_map.fn t.blk_map_root) in *)
       { ctxt; T.root=t.root; sz=t.sz; times=t.times; blk_map }
   end
@@ -322,19 +371,22 @@ module File_1 = struct
     
   let fn blk_id = Printf.sprintf "file_%d" blk_id
 
+  let blk_map_ctxt (ctxt:ctxt) = 
+    Blk_map.{free_many=ctxt.free_many}
+
   let save t = 
     Blk_map.save t.blk_map;
     t |> Tmp.of_t |> Tmp.sexp_of_t |> Sexplib.Sexp.save_hum (fn t.root)
 
-  let load ctxt fn =
+  let load (ctxt:ctxt) fn =
     assert(Sys.file_exists fn);
     Sexplib.Sexp.load_sexp fn |> Tmp.t_of_sexp |> fun tmp -> 
-    Blk_map.(load ctxt (fn tmp.blk_map_root)) |> fun blk_map -> 
+    Blk_map.(load (blk_map_ctxt ctxt) (fn tmp.blk_map_root)) |> fun blk_map -> 
     Tmp.to_t ctxt blk_map tmp
 
   let create ctxt blk_id = 
-    Freelist.alloc ctxt.freelist >>= fun x -> 
-    Blk_map.create ctxt x >>= fun blk_map ->
+    ctxt.alloc () >>= fun x -> 
+    Blk_map.create (blk_map_ctxt ctxt) x >>= fun blk_map ->
     let times = ctxt.now () in
     let t = {ctxt;root=blk_id;sz=0;times;blk_map} in
     save t;
@@ -346,25 +398,27 @@ module File_1 = struct
     Blk_map.get_blkid t.blk_map i >>= function
     | None -> 
       (* allocate new blk and return *)
-      Freelist.alloc t.ctxt.freelist >>= fun blk_id ->
+      t.ctxt.alloc () >>= fun blk_id ->
       Blk_map.set_blkid t.blk_map i blk_id >>= fun () ->
       return blk_id
     | Some blk_id -> return blk_id
 
   let read_blk t i = 
     read_blkid t i >>= fun blk_id -> 
-    Blkdev.read blk_id
+    Blkdev.read t.ctxt.blkdev blk_id
 
   let write_blk t i blk =    
     read_blkid t i >>= fun blk_id -> 
-    Blkdev.write blk_id blk >>= fun () -> 
+    Blkdev.write t.ctxt.blkdev blk_id blk >>= fun () -> 
     update_mtim t; return ()
 
+(*
   let reveal_blk t i = 
     let blk_i = i / blk_sz in
     read_blkid t blk_i >>= fun blk_id -> 
     Blkdev.read blk_id >>= fun blk -> 
     return (blk_id,blk, i mod blk_sz)
+*)
   
   (** NOTE see explanation in pread.txt *)  
   type pread_t = { 
@@ -378,17 +432,17 @@ module File_1 = struct
   }     
 
   (* obviously a lot of these calculations could be simplified *)
-  let rec calculate_reads ~off0 ~len0 ~dst_off0 = 
+  let rec calculate_reads ~ctxt ~off0 ~len0 ~dst_off0 = 
     match len0 = 0 with 
     | true -> []
     | false -> 
-      let blk = off0 / blk_sz in
-      let blkoff = off0 mod blk_sz in
+      let blk = off0 / ctxt.blk_sz in
+      let blkoff = off0 mod ctxt.blk_sz in
       let len_rem = len0 in
-      let len = min len_rem (blk_sz - blkoff) in
+      let len = min len_rem (ctxt.blk_sz - blkoff) in
       let dst_off = dst_off0 in
       let r = { off0; len0; blk; blkoff; len_rem; len; dst_off } in
-      r :: calculate_reads ~off0:(off0+len) ~len0:(len0 - len) ~dst_off0:(dst_off + len)
+      r :: calculate_reads ~ctxt ~off0:(off0+len) ~len0:(len0 - len) ~dst_off0:(dst_off + len)
 
   let empty_buf = Bigstringaf.create 0
 
@@ -404,7 +458,7 @@ module File_1 = struct
       (* we separate into two stages; first stage, we calculate where we
          need to read; second stage we perform the actual reads; this
          allows us to take advantage of possible future parallelism *)
-      let reads = calculate_reads ~off0 ~len0 ~dst_off0:0 in
+      let reads = calculate_reads ~ctxt:t.ctxt ~off0 ~len0 ~dst_off0:0 in
       begin 
         reads  |> iter_k (fun ~k reads -> 
           match reads with
@@ -424,23 +478,23 @@ module File_1 = struct
     len     : int; (* data to write to this block at blkoff *)
   }
 
-  let rec calculate_writes ~off0 ~len0 ~bufoff0 =
+  let rec calculate_writes ~ctxt ~off0 ~len0 ~bufoff0 =
     match len0 = 0 with
     | true -> []
     | false -> 
       let bufoff = bufoff0 in
-      let blk = off0 / blk_sz in
-      let blkoff = off0 mod blk_sz in
-      let len = min len0 (blk_sz - blkoff) in
+      let blk = off0 / ctxt.blk_sz in
+      let blkoff = off0 mod ctxt.blk_sz in
+      let len = min len0 (ctxt.blk_sz - blkoff) in
       let r = { off0; len0; bufoff; blk; blkoff; len } in
-      r :: calculate_writes ~off0:(off0+len) ~len0:(len0 - len) ~bufoff0:(bufoff0+len)
+      r :: calculate_writes ~ctxt ~off0:(off0+len) ~len0:(len0 - len) ~bufoff0:(bufoff0+len)
 
   let pwrite dst ~src:buf ~dst_off = 
     let len0 = Bigstringaf.length buf in
     match len0 > 0 with
     | false -> return ()
     | true -> 
-      let writes = calculate_writes ~off0:dst_off ~len0 ~bufoff0:0 in
+      let writes = calculate_writes ~ctxt:dst.ctxt ~off0:dst_off ~len0 ~bufoff0:0 in
       writes |> iter_k (fun ~k writes -> 
           match writes with
           | [] -> 
@@ -477,14 +531,14 @@ module File_1 = struct
 end
 
 module File 
-  : FILE with type 'a m='a m and type blk=blk and type blk_id=blk_id and type ctxt=ctxt
+  : FILE with type 'a m='a m and type blk=blk and type blk_id=blk_id and type ctxt=File_1.ctxt
   = File_1
 
 
 module Dir_1 = struct
   type nonrec 'a m = 'a m
   type nonrec blk_id = blk_id
-  type nonrec ctxt = ctxt
+  type ctxt = File_1.ctxt
       
   type did (* dir id *)  = blk_id[@@deriving sexp]
   type fid (* file id *) = blk_id 
@@ -571,5 +625,5 @@ module Dir_1 = struct
 end
 
 module Dir 
-  : DIR with type 'a m='a m and type blk_id=blk_id and type ctxt=ctxt
+  : DIR with type 'a m='a m and type blk_id=blk_id and type ctxt=File_1.ctxt
   = Dir_1
