@@ -1,4 +1,4 @@
-TMP_DOC_DIR:=/tmp/minimal_ocaml
+TMP_DOC_DIR:=/tmp/fs0
 scratch:=/tmp/l/github/scratch
 
 default: all
