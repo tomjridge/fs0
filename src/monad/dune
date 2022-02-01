@@ -1,0 +1,5 @@
+(library
+ (public_name "fs0.monad")
+ (name "fs0_monad"))
+
+
